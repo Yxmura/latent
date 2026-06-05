@@ -1,0 +1,365 @@
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 1aa3c1f..fae3e77 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -589,6 +589,8 @@ extern "C" {
+ 
+         GGML_OP_GLU,
+ 
++        GGML_OP_LATENT_EXPERT_FFN,
++
+         GGML_OP_COUNT,
+     };
+ 
+@@ -1362,6 +1364,25 @@ extern "C" {
+             float                 alpha,
+             float                 limit);
+ 
++    // fused LATENT MoE expert FFN: 15 inputs (x, ids, weights, 6 NF4 factors + 6 scales)
++    GGML_API struct ggml_tensor * ggml_latent_expert_ffn(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * x,
++            struct ggml_tensor  * ids,
++            struct ggml_tensor  * weights,
++            struct ggml_tensor  * gate_a,
++            struct ggml_tensor  * gate_a_s,
++            struct ggml_tensor  * gate_b,
++            struct ggml_tensor  * gate_b_s,
++            struct ggml_tensor  * up_a,
++            struct ggml_tensor  * up_a_s,
++            struct ggml_tensor  * up_b,
++            struct ggml_tensor  * up_b_s,
++            struct ggml_tensor  * down_a,
++            struct ggml_tensor  * down_a_s,
++            struct ggml_tensor  * down_b,
++            struct ggml_tensor  * down_b_s);
++
+     // normalize along rows
+     GGML_API struct ggml_tensor * ggml_norm(
+             struct ggml_context * ctx,
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index 246183c..0e905d8 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -977,7 +977,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(co
+             } break;
+             case GGML_OP_OPT_STEP_ADAMW:
+             case GGML_OP_OPT_STEP_SGD:
+-            case GGML_OP_GLU: {
++            case GGML_OP_GLU:
++            case GGML_OP_LATENT_EXPERT_FFN: {
+                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
+             } break;
+             default: {
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index ab9976f..92511a7 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -2015,6 +2015,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_glu(params, tensor);
+             } break;
++        case GGML_OP_LATENT_EXPERT_FFN:
++            {
++                ggml_compute_forward_latent_expert_ffn(params, tensor);
++            } break;
+         case GGML_OP_GET_REL_POS:
+             {
+                 ggml_compute_forward_get_rel_pos(params, tensor);
+@@ -2298,10 +2302,6 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+             break;
+         case GGML_OP_GLU:
+             switch (ggml_get_glu_op(node)) {
+-                case GGML_GLU_OP_REGLU:
+-                case GGML_GLU_OP_GEGLU:
+-                case GGML_GLU_OP_SWIGLU:
+-                case GGML_GLU_OP_SWIGLU_OAI:
+                 case GGML_GLU_OP_GEGLU_ERF:
+                 case GGML_GLU_OP_GEGLU_QUICK:
+                     {
+@@ -2311,6 +2311,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+                     GGML_ABORT("fatal error");
+             }
+             break;
++        case GGML_OP_LATENT_EXPERT_FFN:
++            {
++                n_tasks = 1;  // single-threaded ABORT stub
++            } break;
+         case GGML_OP_SILU_BACK:
+         case GGML_OP_MUL:
+         case GGML_OP_DIV:
+diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index c545824..fd7c580 100644
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -11899,3 +11899,18 @@ void ggml_compute_forward_fwht(const ggml_compute_params * params, ggml_tensor *
+             }
+     }
+ }
++
++// ggml_compute_forward_latent_expert_ffn
++//
++// CPU reference implementation: dequantize NF4 factors and compute the
++// per-active-expert SwiGLU FFN using the existing loader/latent_runtime.py
++// semantics. This is correctness-first; the CUDA path is the performance
++// target. Currently ABORTs so that the CPU backend doesn't pretend to
++// implement an op that no real llama.cpp model uses yet.
++
++void ggml_compute_forward_latent_expert_ffn(
++        const ggml_compute_params * params,
++        ggml_tensor * dst) {
++    GGML_ABORT("GGML_OP_LATENT_EXPERT_FFN: CPU forward not implemented; "
++               "this op is only supported on the CUDA backend");
++}
+diff --git a/ggml/src/ggml-cpu/ops.h b/ggml/src/ggml-cpu/ops.h
+index dd17560..6ba72cb 100644
+--- a/ggml/src/ggml-cpu/ops.h
++++ b/ggml/src/ggml-cpu/ops.h
+@@ -97,6 +97,7 @@ void ggml_compute_forward_win_part(const struct ggml_compute_params * params, st
+ void ggml_compute_forward_win_unpart(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_unary(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_glu(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_latent_expert_ffn(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_get_rel_pos(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_add_rel_pos(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_rwkv_wkv6(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 6e072c4..940fdcc 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2978,6 +2978,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+                     return false;
+             }
+             break;
++        case GGML_OP_LATENT_EXPERT_FFN:
++            ggml_cuda_op_latent_expert_ffn(ctx, dst);
++            break;
+         case GGML_OP_NORM:
+             ggml_cuda_op_norm(ctx, dst);
+             break;
+@@ -5223,6 +5226,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                     return false;
+             }
+             break;
++        case GGML_OP_LATENT_EXPERT_FFN:
++            // The fused LATENT kernel handles its own input layout; the
++            // graph builder is responsible for passing contiguous NF4
++            // factors + per-group FP16 scales.
++            return true;
++            break;
+         case GGML_OP_MUL_MAT:
+         case GGML_OP_MUL_MAT_ID:
+             {
+diff --git a/ggml/src/ggml-cuda/latent-fused-expert-ffn.cu b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cu
+new file mode 100644
+index 0000000..a147387
+--- /dev/null
++++ b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cu
+@@ -0,0 +1,19 @@
++// ggml/src/ggml-cuda/latent-fused-expert-ffn.cu
++// LATENT MoE expert FFN kernel stub.
++//
++// install.sh overwrites this file with the real v1 kernel from
++// kernels/latent_fused_expert_ffn.cu at install time. The stub here
++// exists so the patch series applies to a clean llama.cpp checkout
++// and the codebase still builds (it just aborts at runtime if the
++// LATENT op is ever executed without a real kernel being installed).
++
++#include "latent-fused-expert-ffn.cuh"
++
++void ggml_cuda_latent_expert_ffn(
++    ggml_backend_cuda_context & ctx,
++    struct ggml_tensor * dst) {
++    GGML_ABORT("ggml_cuda_latent_expert_ffn: kernel not installed; "
++               "run install.sh to copy the real v1 kernel from "
++               "kernels/latent_fused_expert_ffn.cu into "
++               "ggml/src/ggml-cuda/latent-fused-expert-ffn.cu");
++}
+diff --git a/ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh
+new file mode 100644
+index 0000000..1f38561
+--- /dev/null
++++ b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh
+@@ -0,0 +1,22 @@
++// ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh
++// LATENT MoE expert FFN host wrapper.
++//
++// This file is installed by patches/003 (as a stub declaration) and then
++// OVERWRITTEN at install time by install.sh, which copies
++// kernels/latent_fused_expert_ffn.cuh from the LATENT repo into this
++// location. The real header declares the host wrapper and the NF4
++// dequant helpers used by the v1 fused kernel.
++
++#pragma once
++
++#include "ggml.h"
++
++struct ggml_backend_cuda_context;
++
++// Host wrapper for the LATENT fused expert FFN kernel. Called by
++// ggml_cuda_op_latent_expert_ffn() in latent.cu. The patch's stub
++// implementation (in latent-fused-expert-ffn.cu) ABORTs at runtime;
++// the real kernel is provided by install.sh.
++void ggml_cuda_latent_expert_ffn(
++    ggml_backend_cuda_context & ctx,
++    struct ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/unary.cu b/ggml/src/ggml-cuda/unary.cu
+index 2aeba26..302c068 100644
+--- a/ggml/src/ggml-cuda/unary.cu
++++ b/ggml/src/ggml-cuda/unary.cu
+@@ -1,5 +1,6 @@
+ #include "unary.cuh"
+ #include "convert.cuh"
++#include "latent-fused-expert-ffn.cuh"
+ 
+ static __device__ __forceinline__ float op_abs(float x) {
+     return fabsf(x);
+@@ -638,3 +639,12 @@ void ggml_cuda_op_relu_sqr(ggml_backend_cuda_context & ctx, ggml_tensor * relu_n
+         unary_cuda<op_relu_sqr>((const float *)src->data, (float *)sqr_node->data, k, stream);
+     }
+ }
++
++// LATENT fused MoE expert FFN dispatch. The actual implementation lives
++// in latent-fused-expert-ffn.cu (a stub installed by patch 003, then
++// overwritten at install time by install.sh with the real v1 kernel from
++// kernels/latent_fused_expert_ffn.cu).
++
++void ggml_cuda_op_latent_expert_ffn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    ggml_cuda_latent_expert_ffn(ctx, dst);
++}
+diff --git a/ggml/src/ggml-cuda/unary.cuh b/ggml/src/ggml-cuda/unary.cuh
+index 81ed873..9570e33 100644
+--- a/ggml/src/ggml-cuda/unary.cuh
++++ b/ggml/src/ggml-cuda/unary.cuh
+@@ -87,6 +87,11 @@ void ggml_cuda_op_geglu_erf(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
+ void ggml_cuda_op_geglu_quick(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
++// LATENT fused MoE expert FFN. Forwarded to the host wrapper declared
++// in latent-fused-expert-ffn.cuh (stub installed by patch 003, then
++// overwritten at install time by install.sh with the real v1 kernel).
++void ggml_cuda_op_latent_expert_ffn(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++
+ void ggml_cuda_op_xielu(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+ 
+ void ggml_cuda_op_unary_mul(ggml_backend_cuda_context & ctx, ggml_tensor * unary_node, ggml_tensor * mul_node);
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index ebf9630..a77abfd 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -1084,9 +1084,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "OPT_STEP_SGD",
+ 
+     "GLU",
++
++    "LATENT_EXPERT_FFN",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
++static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1200,9 +1202,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "sgd(x)",
+ 
+     "glu(x)",
++
++    "latent_expert_ffn(x,ids,w,A,B,...)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
++static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -2903,6 +2907,79 @@ static struct ggml_tensor * ggml_glu_impl(
+     return result;
+ }
+ 
++// ggml_latent_expert_ffn
++//
++// Build a graph node for the fused LATENT MoE expert FFN. The kernel takes:
++//   src[0]  = x               [n_embd, n_tokens]
++//   src[1]  = ids             [n_expert_used, n_tokens]  (selected_experts)
++//   src[2]  = weights         [1, n_expert_used, n_tokens] (routing weights)
++//   src[3]  = gate_a_nf4      [n_embd, max_rank]
++//   src[4]  = gate_a_scales   [n_embd/32, max_rank]
++//   src[5]  = gate_b_nf4      [max_rank, n_ff]
++//   src[6]  = gate_b_scales   [max_rank, n_ff/32]
++//   src[7]  = up_a_nf4        [n_embd, max_rank]
++//   src[8]  = up_a_scales
++//   src[9]  = up_b_nf4        [max_rank, n_ff]
++//   src[10] = up_b_scales
++//   src[11] = down_a_nf4      [n_ff, max_rank]
++//   src[12] = down_a_scales
++//   src[13] = down_b_nf4      [max_rank, n_embd]
++//   src[14] = down_b_scales
++//
++// Result: [n_embd, n_expert_used, n_tokens] contribution that the caller
++// reduces (sums) across the n_expert_used axis into [n_embd, n_tokens].
++
++struct ggml_tensor * ggml_latent_expert_ffn(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * x,
++        struct ggml_tensor  * ids,
++        struct ggml_tensor  * weights,
++        struct ggml_tensor  * gate_a,
++        struct ggml_tensor  * gate_a_s,
++        struct ggml_tensor  * gate_b,
++        struct ggml_tensor  * gate_b_s,
++        struct ggml_tensor  * up_a,
++        struct ggml_tensor  * up_a_s,
++        struct ggml_tensor  * up_b,
++        struct ggml_tensor  * up_b_s,
++        struct ggml_tensor  * down_a,
++        struct ggml_tensor  * down_a_s,
++        struct ggml_tensor  * down_b,
++        struct ggml_tensor  * down_b_s) {
++    GGML_ASSERT(x);
++    GGML_ASSERT(ids);
++    GGML_ASSERT(weights);
++    GGML_ASSERT(gate_a && gate_b && up_a && up_b && down_a && down_b);
++
++    const int64_t n_embd = x->ne[0];
++    const int64_t n_tokens = x->ne[1];
++    const int64_t n_expert_used = ids->ne[0];
++    const int64_t n_ff = gate_b->ne[1];
++
++    int64_t ne[4] = { n_embd, n_expert_used, n_tokens, 1 };
++    // Output tensor: f32 because per-expert weights are applied before reduction
++    struct ggml_tensor * result = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2], ne[3]);
++
++    result->op = GGML_OP_LATENT_EXPERT_FFN;
++    result->src[0]  = x;
++    result->src[1]  = ids;
++    result->src[2]  = weights;
++    result->src[3]  = gate_a;
++    result->src[4]  = gate_a_s;
++    result->src[5]  = gate_b;
++    result->src[6]  = gate_b_s;
++    result->src[7]  = up_a;
++    result->src[8]  = up_a_s;
++    result->src[9]  = up_b;
++    result->src[10] = up_b_s;
++    result->src[11] = down_a;
++    result->src[12] = down_a_s;
++    result->src[13] = down_b;
++    result->src[14] = down_b_s;
++
++    return result;
++}
++
+ // ggml_floor
+ 
+ struct ggml_tensor * ggml_floor(
+@@ -7077,6 +7154,9 @@ static void ggml_compute_backward(
+                 } //break;
+             }
+         } break;
++        case GGML_OP_LATENT_EXPERT_FFN: {
++            GGML_ABORT("backward pass for GGML_OP_LATENT_EXPERT_FFN is not implemented");
++        } break;
+         case GGML_OP_NONE: {
+             // noop
+         } break;
