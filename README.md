@@ -30,25 +30,59 @@ Implemented now:
 - reconstruction error reporting and dense fallback metadata
 - CPU reference runtime for SwiGLU expert reconstruction
 - synthetic benchmark protocol
+- full-model SVD compression pipeline (per-layer, per-expert)
+- PRISM-style adaptive top-k threshold dropping
+- end-to-end validation pipeline (dense vs LATENT runtime comparison)
 - CUDA/HIP fused expert kernel source installed into the pinned V4 fork layout
-- installer plus `patches/001-latent-cuda-kernel.patch`
+- three llama.cpp patch artifacts in `patches/`:
+  - `002-latent-gguf-tensors.patch`: tensor enums, names, layer struct fields,
+    GGUF loading at `max_rank=128`
+  - `003-latent-fused-kernel.patch`: `GGML_OP_LATENT_EXPERT_FFN` op + CUDA handler
+  - `004-latent-graph-integration.patch`: graph builder op + DeepSeek V4 wiring
 
 Still requires target-fork integration:
 
 - exact V4 Flash expert tensor-name mapping
 - verified V4 Flash tensor shapes
-- llama.cpp graph/op registration for LATENT factor tensors
-- end-to-end quality evaluation
-- real GPU kernel profiling and optimization
+- llama.cpp build verification with the patch series applied on real hardware
+- end-to-end quality evaluation against dense V4 reference
+- real GPU kernel profiling and optimization (v2 kernel is unverified)
 - ROCm/HIP compile verification on a machine with ROCm installed
 
 Verified locally:
 
-- `python -m pytest -q`: passing
+- `python -m pytest -q`: 21/21 passing
 - pinned `cchuter/llama.cpp` branch `feat/v4-port-cuda` cloned under `vendor/llama.cpp-v4`
 - CPU-only llama.cpp build: passing
 - CUDA llama.cpp build with LATENT source installed: passing
 - HIP configure: blocked locally because CMake cannot find `hipConfig.cmake`
+
+## Patch Series
+
+The `patches/` directory contains three sequential patches that progressively
+integrate LATENT into the pinned V4 llama.cpp fork. They are designed to be
+applied in numeric order to a clean checkout of `cchuter/llama.cpp` at
+`feat/v4-port-cuda`:
+
+1. **002-latent-gguf-tensors.patch** — adds 12 new `LLM_TENSOR_FFN_LATENT_*`
+   enums (A/B factors + scales for gate/up/down), registers tensor names in
+   `llama-arch.cpp`, extends the layer struct in `llama-model.h`, and adds
+   the V4 DeepSeek tensor loading code at `max_rank=128`.
+
+2. **003-latent-fused-kernel.patch** — adds the `GGML_OP_LATENT_EXPERT_FFN`
+   op (`= GGML_OP_COUNT + 1024`) to avoid clashing with existing op numbers,
+   plus the CUDA dispatch handler `ggml_cuda_latent_expert_ffn` that fuses
+   15 inputs (x, ids, weights, 6 factors + 6 scales) into a single
+   per-active-expert SwiGLU FFN.
+
+3. **004-latent-graph-integration.patch** — adds the graph op builder
+   `ggml_latent_expert_ffn`, the `build_moe_ffn_latent` helper in
+   `llama-graph.cpp`, and wires the DeepSeek V4 model to call it
+   (`models/deepseek4.cpp`).
+
+The patches are best-effort. They are not yet known to apply cleanly to the
+exact upstream SHA pinned by `vendor/llama.cpp-v4`; verify with
+`git apply --check` before use.
 
 ## Why This Replaces STASIS
 
@@ -95,6 +129,23 @@ Run the synthetic benchmark:
 python benchmarks/latent_svd_bench.py
 ```
 
+Run the end-to-end validation (compares LATENT runtime output to dense
+SwiGLU reference across multiple intrinsic ranks and configurations):
+
+```bash
+python benchmarks/end_to_end_validation.py \\
+  --rows 4096 --cols 2048 --max-rank 128
+```
+
+Run the full-model SVD pipeline (requires a real V4 GGUF):
+
+```bash
+python loader/full_model_svd.py \\
+  --gguf model.gguf \\
+  --output build/latent_factors \\
+  --max-rank 128
+```
+
 Run tests:
 
 ```bash
@@ -104,11 +155,12 @@ python -m pytest
 ## Repository Layout
 
 ```text
-loader/       SVD, factorization, quantization, metadata output
+loader/       SVD, factorization, quantization, runtime, adaptive top-k
 kernels/      CUDA/HIP fused expert dispatch and reduce source
-benchmarks/   synthetic timing and real-model measurement protocol
+              (v1 baseline, v2 optimized with shared-mem x cache, HIP variant)
+benchmarks/   synthetic timing, end-to-end validation, real-model measurement
 notes/        technical notes and integration assumptions
-patches/      llama.cpp patch artifacts
+patches/      llama.cpp patch artifacts (002/003/004)
 tests/        Python unit tests
 ```
 
