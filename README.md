@@ -41,6 +41,11 @@ Implemented now:
     `LLM_TENSOR_FFN_LATENT_GATE` enum, tensor name, struct field, and
     optional `TENSOR_NOT_REQUIRED` loading for all three latent
     projections in DeepSeek V4
+  - `003-latent-fused-kernel.patch`: registers `GGML_OP_LATENT_EXPERT_FFN`,
+    adds the graph builder, CPU/CUDA dispatch, and a stub kernel that
+    aborts at runtime (overwritten by `install.sh` with the real v1 kernel)
+  - `004-latent-graph-integration.patch`: adds the
+    `build_moe_ffn_latent` graph builder method
   - the v2 and HIP kernels are installed by `install.sh` (new files only)
 
 Still requires target-fork integration:
@@ -62,10 +67,10 @@ Verified locally:
 
 ## Patch Series
 
-The `patches/` directory contains two patches that integrate LATENT into
-the pinned V4 llama.cpp fork. They apply cleanly to a clean checkout of
-`cchuter/llama.cpp` at `feat/v4-port-cuda` (verified with
-`git apply --check`):
+The `patches/` directory contains three sequential patches that integrate
+LATENT into the pinned V4 llama.cpp fork. They apply cleanly to a clean
+checkout of `cchuter/llama.cpp` at `feat/v4-port-cuda` (verified with
+`git apply --check` from a clean tree):
 
 1. **001-latent-cuda-kernel.patch** — adds the v1 fused kernel source files
    (`ggml/src/ggml-cuda/latent-fused-expert-ffn.cu` and `.cuh`). This is
@@ -78,23 +83,38 @@ the pinned V4 llama.cpp fork. They apply cleanly to a clean checkout of
    all three `ffn_latent_{gate,up,down}` projections in
    `models/deepseek4.cpp`. Models without LATENT tensors load unchanged.
 
+3. **003-latent-fused-kernel.patch** — registers a new
+   `GGML_OP_LATENT_EXPERT_FFN` (bumping `GGML_OP_COUNT` from 102 to 103).
+   Adds the `ggml_latent_expert_ffn` graph builder, the op name/symbol
+   entries, the CPU forward function (a stub that aborts at runtime), the
+   CPU scheduler case, the CUDA `op_supports_op` and dispatch cases, and
+   a stub `latent-fused-expert-ffn.cu/.cuh` that aborts at runtime. The
+   stub is overwritten at install time by `install.sh` with the real v1
+   kernel from `kernels/`.
+
+4. **004-latent-graph-integration.patch** — adds the
+   `llm_graph_context::build_moe_ffn_latent` method declaration in
+   `llama-graph.h` and a 130-line implementation in `llama-graph.cpp`.
+   The implementation handles routing (topk, weights) and emits a single
+   `ggml_latent_expert_ffn` op followed by a reduce across the
+   `n_expert_used` axis.
+
+**Not yet wired up in the patch series:**
+
+- The `models/deepseek4.cpp::build_graph` call site that branches on
+  whether the model is dense or LATENT. This is the final integration
+  step and requires per-model knowledge of the LATENT GGUF tensor layout
+  that has not been verified.
+- Real CUDA build verification. The CPU-only build is verified clean
+  with all three patches applied. The CUDA build hits a pre-existing
+  v4 fork issue in `soft_max_f32` template instantiation that is
+  unrelated to the LATENT patches.
+- Real-model validation against a V4 Flash GGUF.
+
 The optimized v2 kernel (`kernels/latent_fused_expert_ffn_v2.cu`) and the
 HIP kernel (`kernels/latent_fused_expert_ffn_hip.cu`) are installed by
 `install.sh` rather than via patch — they add new files only and don't
 need source-tree changes.
-
-**Not yet implemented in patch form:**
-
-- A graph builder function (`build_moe_ffn_latent`) in
-  `src/llama-graph.cpp` that takes LATENT factor tensors and dispatches
-  the fused kernel. This is the missing link between the kernel and the
-  DeepSeek V4 model graph. Adding it requires ~150 lines of C++ in
-  critical llama.cpp internals; deferred pending user-side authoring.
-- A `GGML_OP_LATENT_EXPERT_FFN` entry. The v4 fork has
-  `static_assert(GGML_OP_COUNT == 102, ...)` in three places, so adding
-  a new op is invasive. The current design calls the kernel directly
-  from C++ via the host wrapper in the .cuh header, bypassing the GGML
-  op table.
 
 ## Why This Replaces STASIS
 
