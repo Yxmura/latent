@@ -1,0 +1,132 @@
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 0000000..1111111 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -410,6 +410,18 @@ enum llm_tensor {
+     LLM_TENSOR_FFN_DOWN_CHEXPS,
+     LLM_TENSOR_FFN_GATE_CHEXPS,
+     LLM_TENSOR_FFN_UP_CHEXPS,
++    // LATENT low-rank expert factors (A = U*sqrt(S), B = sqrt(S)*Vt, NF4 quantized)
++    LLM_TENSOR_FFN_LATENT_GATE_A,
++    LLM_TENSOR_FFN_LATENT_GATE_B,
++    LLM_TENSOR_FFN_LATENT_UP_A,
++    LLM_TENSOR_FFN_LATENT_UP_B,
++    LLM_TENSOR_FFN_LATENT_DOWN_A,
++    LLM_TENSOR_FFN_LATENT_DOWN_B,
++    LLM_TENSOR_FFN_LATENT_GATE_A_SCALE,
++    LLM_TENSOR_FFN_LATENT_GATE_B_SCALE,
++    LLM_TENSOR_FFN_LATENT_UP_A_SCALE,
++    LLM_TENSOR_FFN_LATENT_UP_B_SCALE,
++    LLM_TENSOR_FFN_LATENT_DOWN_A_SCALE,
++    LLM_TENSOR_FFN_LATENT_DOWN_B_SCALE,
+     LLM_TENSOR_FFN_EXP_PROBS_B,
+     LLM_TENSOR_FFN_LATENT_DOWN,
+     LLM_TENSOR_FFN_LATENT_UP,
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index 0000000..2222222 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -390,6 +390,18 @@ static const std::unordered_map<llm_tensor, const char *> tensor_names = {
+     { LLM_TENSOR_FFN_DOWN_CHEXPS,                        "blk.%d.ffn_down_chexps" },
+     { LLM_TENSOR_FFN_GATE_CHEXPS,                        "blk.%d.ffn_gate_chexps" },
+     { LLM_TENSOR_FFN_UP_CHEXPS,                          "blk.%d.ffn_up_chexps" },
++    // LATENT low-rank expert factors
++    { LLM_TENSOR_FFN_LATENT_GATE_A,                      "blk.%d.ffn_latent_gate_a" },
++    { LLM_TENSOR_FFN_LATENT_GATE_B,                      "blk.%d.ffn_latent_gate_b" },
++    { LLM_TENSOR_FFN_LATENT_UP_A,                        "blk.%d.ffn_latent_up_a" },
++    { LLM_TENSOR_FFN_LATENT_UP_B,                        "blk.%d.ffn_latent_up_b" },
++    { LLM_TENSOR_FFN_LATENT_DOWN_A,                      "blk.%d.ffn_latent_down_a" },
++    { LLM_TENSOR_FFN_LATENT_DOWN_B,                      "blk.%d.ffn_latent_down_b" },
++    { LLM_TENSOR_FFN_LATENT_GATE_A_SCALE,                "blk.%d.ffn_latent_gate_a_scale" },
++    { LLM_TENSOR_FFN_LATENT_GATE_B_SCALE,                "blk.%d.ffn_latent_gate_b_scale" },
++    { LLM_TENSOR_FFN_LATENT_UP_A_SCALE,                  "blk.%d.ffn_latent_up_a_scale" },
++    { LLM_TENSOR_FFN_LATENT_UP_B_SCALE,                  "blk.%d.ffn_latent_up_b_scale" },
++    { LLM_TENSOR_FFN_LATENT_DOWN_A_SCALE,                "blk.%d.ffn_latent_down_a_scale" },
++    { LLM_TENSOR_FFN_LATENT_DOWN_B_SCALE,                "blk.%d.ffn_latent_down_b_scale" },
+     { LLM_TENSOR_FFN_EXP_PROBS_B,                        "blk.%d.ffn_exp_probs_b" },
+     { LLM_TENSOR_FFN_LATENT_DOWN,                        "blk.%d.ffn_latent_down" },
+     { LLM_TENSOR_FFN_LATENT_UP,                          "blk.%d.ffn_latent_up" },
+@@ -818,6 +830,18 @@ static const std::unordered_map<llm_tensor, std::pair<llm_tensor, ggml_op>> tensor_ops = {
+     {LLM_TENSOR_FFN_DOWN_CHEXPS,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_GATE_CHEXPS,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_UP_CHEXPS,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    // LATENT low-rank expert factors
++    {LLM_TENSOR_FFN_LATENT_GATE_A,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_GATE_B,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_UP_A,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_UP_B,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_DOWN_A,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_DOWN_B,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_GATE_A_SCALE,    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_GATE_B_SCALE,    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_UP_A_SCALE,      {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_UP_B_SCALE,      {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_DOWN_A_SCALE,    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
++    {LLM_TENSOR_FFN_LATENT_DOWN_B_SCALE,    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_EXP_PROBS_B,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+     {LLM_TENSOR_FFN_LATENT_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_FFN_LATENT_UP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+diff --git a/src/llama-model.h b/src/llama-model.h
+index 3333333..4444444 100644
+--- a/src/llama-model.h
++++ b/src/llama-model.h
+@@ -314,6 +314,20 @@ struct llama_layer {
+     struct ggml_tensor * ffn_latent_down = nullptr;
+     struct ggml_tensor * ffn_latent_up   = nullptr;
+ 
++    // LATENT low-rank expert factors
++    struct ggml_tensor * ffn_latent_gate_a         = nullptr;
++    struct ggml_tensor * ffn_latent_gate_b         = nullptr;
++    struct ggml_tensor * ffn_latent_up_a           = nullptr;
++    struct ggml_tensor * ffn_latent_up_b           = nullptr;
++    struct ggml_tensor * ffn_latent_down_a         = nullptr;
++    struct ggml_tensor * ffn_latent_down_b         = nullptr;
++    struct ggml_tensor * ffn_latent_gate_a_scale   = nullptr;
++    struct ggml_tensor * ffn_latent_gate_b_scale   = nullptr;
++    struct ggml_tensor * ffn_latent_up_a_scale     = nullptr;
++    struct ggml_tensor * ffn_latent_up_b_scale     = nullptr;
++    struct ggml_tensor * ffn_latent_down_a_scale   = nullptr;
++    struct ggml_tensor * ffn_latent_down_b_scale   = nullptr;
++
+     // ff shared expert (shexp)
+     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
+     struct ggml_tensor * ffn_gate_shexp     = nullptr;
+diff --git a/src/models/deepseek4.cpp b/src/models/deepseek4.cpp
+index 5555555..6666666 100644
+--- a/src/models/deepseek4.cpp
++++ b/src/models/deepseek4.cpp
+@@ -140,6 +140,42 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader &) {
+             layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd,   n_ff_exp * n_expert_shared}, 0);
+         }
+ 
++        // LATENT: low-rank expert factors (loaded instead of dense experts when using LATENT)
++        // A factors: [n_embd, rank], B factors: [rank, n_ff_exp] for gate/up
++        // A factors: [n_ff_exp, rank], B factors: [rank, n_embd] for down
++        // Note: rank is per-expert variable, but we allocate max rank for all experts
++        // The actual rank is stored in tensor metadata or derived from tensor shape
++        const int64_t max_rank = 128; // max rank per LATENT spec
++        const int64_t n_ff = n_ff_exp;
++        const int64_t n_expert = hparams.n_expert;
++
++        // Gate factors: A [n_embd, max_rank, n_expert], B [max_rank, n_ff, n_expert]
++        layer.ffn_latent_gate_a = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_A, "weight", i), {n_embd, max_rank, n_expert}, 0);
++        layer.ffn_latent_gate_b = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_B, "weight", i), {max_rank, n_ff, n_expert}, 0);
++        // Scales: per-expert, per-group (group size 32)
++        layer.ffn_latent_gate_a_scale = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_A_SCALE, "weight", i), {n_expert, (n_embd * max_rank + 31) / 32}, 0);
++        layer.ffn_latent_gate_b_scale = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_B_SCALE, "weight", i), {n_expert, (max_rank * n_ff + 31) / 32}, 0);
++
++        // Up factors: A [n_embd, max_rank, n_expert], B [max_rank, n_ff, n_expert]
++        layer.ffn_latent_up_a = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_A, "weight", i), {n_embd, max_rank, n_expert}, 0);
++        layer.ffn_latent_up_b = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_B, "weight", i), {max_rank, n_ff, n_expert}, 0);
++        layer.ffn_latent_up_a_scale = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_A_SCALE, "weight", i), {n_expert, (n_embd * max_rank + 31) / 32}, 0);
++        layer.ffn_latent_up_b_scale = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_B_SCALE, "weight", i), {n_expert, (max_rank * n_ff + 31) / 32}, 0);
++
++        // Down factors: A [n_ff, max_rank, n_expert], B [max_rank, n_embd, n_expert]
++        layer.ffn_latent_down_a = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_A, "weight", i), {n_ff, max_rank, n_expert}, 0);
++        layer.ffn_latent_down_b = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_B, "weight", i), {max_rank, n_embd, n_expert}, 0);
++        layer.ffn_latent_down_a_scale = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_A_SCALE, "weight", i), {n_expert, (n_ff * max_rank + 31) / 32}, 0);
++        layer.ffn_latent_down_b_scale = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_B_SCALE, "weight", i), {n_expert, (max_rank * n_embd + 31) / 32}, 0);
++
+         // ffn_gate_inp is the router projection [n_embd, n_expert]
+         // ffn_gate_exps is the gate projection for experts [n_embd, n_ff_exp, n_expert]
+         // ffn_up_exps is the up projection for experts [n_embd, n_ff_exp, n_expert]
