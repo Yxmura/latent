@@ -38,7 +38,8 @@ def project(x: np.ndarray, pair: FactorPair) -> np.ndarray:
 
 def silu(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=np.float32)
-    return x / (1.0 + np.exp(-x))
+    # Use float64 intermediate to avoid overflow on large negative values
+    return (x / (1.0 + np.exp(-x.astype(np.float64)).astype(np.float32))).astype(np.float32)
 
 
 def swiglu_expert(
