@@ -23,6 +23,8 @@ cp "${SCRIPT_DIR}/loader/full_model_svd.py"           "${TOOLS_DIR}/full_model_s
 cp "${SCRIPT_DIR}/loader/adaptive_topk.py"            "${TOOLS_DIR}/adaptive_topk.py"
 cp "${SCRIPT_DIR}/loader/latent_runtime.py"           "${TOOLS_DIR}/latent_runtime.py"
 cp "${SCRIPT_DIR}/benchmarks/end_to_end_validation.py" "${TOOLS_DIR}/end_to_end_validation.py"
+cp "${SCRIPT_DIR}/benchmarks/memory_savings_bench.py"  "${TOOLS_DIR}/memory_savings_bench.py"
+cp "${SCRIPT_DIR}/benchmarks/validate_patches.py"      "${TOOLS_DIR}/validate_patches.py"
 
 if compgen -G "${SCRIPT_DIR}/patches/*.patch" > /dev/null; then
   for patch in "${SCRIPT_DIR}"/patches/*.patch; do
