@@ -137,6 +137,21 @@ python benchmarks/end_to_end_validation.py \\
   --rows 4096 --cols 2048 --max-rank 128
 ```
 
+Run the memory savings benchmark (theoretical compression bound for
+synthetic experts):
+
+```bash
+python benchmarks/memory_savings_bench.py \\
+  --hidden-size 4096 --intermediate-size 2048 \\
+  --n-expert 256 --max-rank 128 --intrinsic-rank 64
+```
+
+Validate the patch files:
+
+```bash
+python benchmarks/validate_patches.py
+```
+
 Run the full-model SVD pipeline (requires a real V4 GGUF):
 
 ```bash
