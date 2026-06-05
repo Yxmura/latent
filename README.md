@@ -35,10 +35,13 @@ Implemented now:
 - end-to-end validation pipeline (dense vs LATENT runtime comparison)
 - CUDA/HIP fused expert kernel source installed into the pinned V4 fork layout
 - three llama.cpp patch artifacts in `patches/`:
-  - `002-latent-gguf-tensors.patch`: tensor enums, names, layer struct fields,
-    GGUF loading at `max_rank=128`
-  - `003-latent-fused-kernel.patch`: `GGML_OP_LATENT_EXPERT_FFN` op + CUDA handler
-  - `004-latent-graph-integration.patch`: graph builder op + DeepSeek V4 wiring
+  - `001-latent-cuda-kernel.patch`: adds the v1 fused kernel source
+    (`.cu` + `.cuh`)
+  - `002-latent-gguf-tensors.patch`: adds the missing
+    `LLM_TENSOR_FFN_LATENT_GATE` enum, tensor name, struct field, and
+    optional `TENSOR_NOT_REQUIRED` loading for all three latent
+    projections in DeepSeek V4
+  - the v2 and HIP kernels are installed by `install.sh` (new files only)
 
 Still requires target-fork integration:
 
@@ -59,30 +62,39 @@ Verified locally:
 
 ## Patch Series
 
-The `patches/` directory contains three sequential patches that progressively
-integrate LATENT into the pinned V4 llama.cpp fork. They are designed to be
-applied in numeric order to a clean checkout of `cchuter/llama.cpp` at
-`feat/v4-port-cuda`:
+The `patches/` directory contains two patches that integrate LATENT into
+the pinned V4 llama.cpp fork. They apply cleanly to a clean checkout of
+`cchuter/llama.cpp` at `feat/v4-port-cuda` (verified with
+`git apply --check`):
 
-1. **002-latent-gguf-tensors.patch** — adds 12 new `LLM_TENSOR_FFN_LATENT_*`
-   enums (A/B factors + scales for gate/up/down), registers tensor names in
-   `llama-arch.cpp`, extends the layer struct in `llama-model.h`, and adds
-   the V4 DeepSeek tensor loading code at `max_rank=128`.
+1. **001-latent-cuda-kernel.patch** — adds the v1 fused kernel source files
+   (`ggml/src/ggml-cuda/latent-fused-expert-ffn.cu` and `.cuh`). This is
+   self-contained: it adds new files, modifies no existing source.
 
-2. **003-latent-fused-kernel.patch** — adds the `GGML_OP_LATENT_EXPERT_FFN`
-   op (`= GGML_OP_COUNT + 1024`) to avoid clashing with existing op numbers,
-   plus the CUDA dispatch handler `ggml_cuda_latent_expert_ffn` that fuses
-   15 inputs (x, ids, weights, 6 factors + 6 scales) into a single
-   per-active-expert SwiGLU FFN.
+2. **002-latent-gguf-tensors.patch** — adds the missing
+   `LLM_TENSOR_FFN_LATENT_GATE` enum, registers its tensor name in
+   `llama-arch.cpp`, adds the `ffn_latent_gate` field to the layer struct
+   in `llama-model.h`, and adds optional `TENSOR_NOT_REQUIRED` loading of
+   all three `ffn_latent_{gate,up,down}` projections in
+   `models/deepseek4.cpp`. Models without LATENT tensors load unchanged.
 
-3. **004-latent-graph-integration.patch** — adds the graph op builder
-   `ggml_latent_expert_ffn`, the `build_moe_ffn_latent` helper in
-   `llama-graph.cpp`, and wires the DeepSeek V4 model to call it
-   (`models/deepseek4.cpp`).
+The optimized v2 kernel (`kernels/latent_fused_expert_ffn_v2.cu`) and the
+HIP kernel (`kernels/latent_fused_expert_ffn_hip.cu`) are installed by
+`install.sh` rather than via patch — they add new files only and don't
+need source-tree changes.
 
-The patches are best-effort. They are not yet known to apply cleanly to the
-exact upstream SHA pinned by `vendor/llama.cpp-v4`; verify with
-`git apply --check` before use.
+**Not yet implemented in patch form:**
+
+- A graph builder function (`build_moe_ffn_latent`) in
+  `src/llama-graph.cpp` that takes LATENT factor tensors and dispatches
+  the fused kernel. This is the missing link between the kernel and the
+  DeepSeek V4 model graph. Adding it requires ~150 lines of C++ in
+  critical llama.cpp internals; deferred pending user-side authoring.
+- A `GGML_OP_LATENT_EXPERT_FFN` entry. The v4 fork has
+  `static_assert(GGML_OP_COUNT == 102, ...)` in three places, so adding
+  a new op is invasive. The current design calls the kernel directly
+  from C++ via the host wrapper in the .cuh header, bypassing the GGML
+  op table.
 
 ## Why This Replaces STASIS
 
