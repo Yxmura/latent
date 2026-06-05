@@ -79,19 +79,17 @@ def test_validate_single_expert_weight_before_down():
     assert np.isfinite(result["runtime_relative_error"])
 
 
-def test_validate_single_expert_low_intrinsic_rank_easier_to_compress():
-    """Lower intrinsic rank means less signal to capture, so runtime error should be lower
-    when max_rank is well above the intrinsic rank."""
-    err_low = validate_single_expert(
-        n_embd=64, n_ff=32, intrinsic_rank=4,
-        compression_max_rank=32, energy=0.99, error_threshold=0.5, seed=42
+def test_validate_single_expert_higher_max_rank_lower_error():
+    """Increasing max_rank (with the same intrinsic rank) should reduce runtime error."""
+    err_fewer = validate_single_expert(
+        n_embd=64, n_ff=32, intrinsic_rank=16,
+        compression_max_rank=16, energy=0.99, error_threshold=0.5, seed=42
     )["runtime_relative_error"]
 
-    err_high = validate_single_expert(
+    err_more = validate_single_expert(
         n_embd=64, n_ff=32, intrinsic_rank=16,
         compression_max_rank=32, energy=0.99, error_threshold=0.5, seed=42
     )["runtime_relative_error"]
 
-    # Lower intrinsic rank -> less signal to capture -> lower runtime error
-    # (when max_rank is well above intrinsic rank)
-    assert err_low <= err_high
+    # More capacity (higher max_rank) -> lower runtime error
+    assert err_more <= err_fewer
