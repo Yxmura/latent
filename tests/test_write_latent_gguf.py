@@ -98,11 +98,56 @@ def test_synthetic_roundtrip(tmpdir: str) -> None:
     assert r.fields["latent.max_rank"].parts[-1][0] == 4
     assert "latent.energy_milli" in r.fields
     tensor_names = {t.name for t in r.tensors}
+    tensors_by_name = {t.name: t for t in r.tensors}
     for layer in range(2):
         for kind in ("gate", "up", "down"):
             for ab in ("a", "b"):
                 assert f"blk.{layer}.ffn_latent_{kind}_{ab}" in tensor_names, \
                     f"missing blk.{layer}.ffn_latent_{kind}_{ab}"
+    # Validate tensor shapes match the per-expert stacked layout consumed
+    # by the CUDA kernel in kernels/latent_fused_expert_ffn.cu.
+    # gate/up: gate_a   ne=[n_expert, n_embd, padded_max_rank]
+    #          gate_a_s ne=[n_expert, n_embd, n_groups_a]
+    #          gate_b   ne=[n_expert, padded_max_rank, padded_n_ff]
+    #          gate_b_s ne=[n_expert, padded_max_rank, n_groups_b]
+    # down:     down_a   ne=[n_expert, n_ff, padded_max_rank]
+    #          down_b   ne=[n_expert, padded_max_rank, n_embd]
+    n_expert = 4
+    n_embd = 32
+    n_ff = 16
+    max_rank = 4
+    n_groups = max_rank // 4  # group_size=4
+    for layer in range(2):
+        for kind in ("gate", "up"):
+            a = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_a"]
+            a_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_a_s"]
+            b = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b"]
+            b_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b_s"]
+            assert tuple(a.shape) == (n_expert, n_embd, max_rank), \
+                f"{a.name} shape {a.shape} != {(n_expert, n_embd, max_rank)}"
+            assert tuple(a_s.shape) == (n_expert, n_embd, n_groups), \
+                f"{a_s.name} shape {a_s.shape} != {(n_expert, n_embd, n_groups)}"
+            assert tuple(b.shape) == (n_expert, max_rank, n_ff), \
+                f"{b.name} shape {b.shape} != {(n_expert, max_rank, n_ff)}"
+            assert tuple(b_s.shape) == (n_expert, max_rank, n_ff // 4), \
+                f"{b_s.name} shape {b_s.shape} != {(n_expert, max_rank, n_ff // 4)}"
+            assert a.tensor_type.name == "I8"
+            assert b.tensor_type.name == "I8"
+            assert a_s.tensor_type.name == "F16"
+            assert b_s.tensor_type.name == "F16"
+        for kind in ("down",):
+            a = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_a"]
+            a_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_a_s"]
+            b = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b"]
+            b_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b_s"]
+            assert tuple(a.shape) == (n_expert, n_ff, max_rank), \
+                f"{a.name} shape {a.shape} != {(n_expert, n_ff, max_rank)}"
+            assert tuple(a_s.shape) == (n_expert, n_ff, n_groups), \
+                f"{a_s.name} shape {a_s.shape} != {(n_expert, n_ff, n_groups)}"
+            assert tuple(b.shape) == (n_expert, max_rank, n_embd), \
+                f"{b.name} shape {b.shape} != {(n_expert, max_rank, n_embd)}"
+            assert tuple(b_s.shape) == (n_expert, max_rank, n_embd // 4), \
+                f"{b_s.name} shape {b_s.shape} != {(n_expert, max_rank, n_embd // 4)}"
     assert "output_norm" in tensor_names
     assert "output" in tensor_names
     assert "blk.0.ffn_norm" in tensor_names

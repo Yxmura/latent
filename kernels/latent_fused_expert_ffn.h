@@ -1,6 +1,10 @@
 #pragma once
 
+#include "common.cuh"
+#include "ggml.h"
+
 #include <stdint.h>
+#include <cstddef>
 
 #if defined(__HIP_PLATFORM_AMD__)
 #include <hip/hip_runtime.h>
@@ -56,3 +60,5 @@ struct latent_reduce_args {
 
 extern "C" LATENT_GLOBAL void latent_fused_expert_dispatch(latent_dispatch_args args);
 extern "C" LATENT_GLOBAL void latent_expert_reduce(latent_reduce_args args);
+
+void ggml_cuda_latent_expert_ffn(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
