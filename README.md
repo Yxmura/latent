@@ -45,7 +45,7 @@ Implemented now:
     adds the graph builder, CPU/CUDA dispatch, and a stub kernel that
     aborts at runtime (overwritten by `install.sh` with the real v1 kernel)
   - `004-latent-graph-integration.patch`: adds the
-    `build_moe_ffn_latent` graph builder method
+    `llm_graph_context::build_moe_ffn_latent` graph builder method
   - the v2 and HIP kernels are installed by `install.sh` (new files only)
 
 Still requires target-fork integration:
@@ -174,7 +174,7 @@ Run the end-to-end validation (compares LATENT runtime output to dense
 SwiGLU reference across multiple intrinsic ranks and configurations):
 
 ```bash
-python benchmarks/end_to_end_validation.py \\
+python benchmarks/end_to_end_validation.py \
   --rows 4096 --cols 2048 --max-rank 128
 ```
 
@@ -182,8 +182,8 @@ Run the memory savings benchmark (theoretical compression bound for
 synthetic experts):
 
 ```bash
-python benchmarks/memory_savings_bench.py \\
-  --hidden-size 4096 --intermediate-size 2048 \\
+python benchmarks/memory_savings_bench.py \
+  --hidden-size 4096 --intermediate-size 2048 \
   --n-expert 256 --max-rank 128 --intrinsic-rank 64
 ```
 
@@ -196,9 +196,9 @@ python benchmarks/validate_patches.py
 Run the full-model SVD pipeline (requires a real V4 GGUF):
 
 ```bash
-python loader/full_model_svd.py \\
-  --gguf model.gguf \\
-  --output build/latent_factors \\
+python loader/full_model_svd.py \
+  --gguf model.gguf \
+  --output build/latent_factors \
   --max-rank 128
 ```
 
@@ -207,6 +207,77 @@ Run tests:
 ```bash
 python -m pytest
 ```
+
+## Hardware Validation Steps
+
+### For NVIDIA RTX (CUDA)
+1. **Prerequisites**: Install CUDA Toolkit (>=11.0), ensure you have a compatible GPU (RTX 3090, 4070, etc.), and have the `llama.cpp` v4 fork cloned at `vendor/llama.cpp-v4` (already present).
+2. **Build llama.cpp with CUDA**:
+   ```bash
+   cd vendor/llama.cpp-v4
+   mkdir -p build && cd build
+   cmake .. -DGGML_CUDA=on -DCMAKE_BUILD_TYPE=Release
+   cmake --build . --config Release
+   ```
+3. **Generate a LATENT GGUF** from your source model (e.g., antirez DeepSeek V4 Flash IQ2_XXS):
+   ```bash
+   cd /path/to/latent
+   python loader/write_latent_gguf.py \
+       --input-gguf /path/to/source.gguf \
+       --output-gguf /tmp/model_latent.gguf \
+       --max-rank 128 \
+       --energy 0.99
+   ```
+4. **Install the LATENT kernel** into your llama.cpp checkout:
+   ```bash
+   cd /path/to/latent
+   ./install.sh   # from the latent repo root; this copies the kernel files into vendor/llama.cpp-v4
+   ```
+5. **Run inference** (sanity check):
+   ```bash
+   cd /path/to/llama.cpp-v4/build
+   ./bin/llama-cli -m /tmp/model_latent.gguf -p "Hello, world!" -n 8 --logit-bias
+   ```
+   If you see output without errors like "unsupported op" or "missing symbol", the LATENT op is linked and the kernel is running.
+6. **Benchmark** (optional): Use `benchmarks/end_to_end_validation.py` or run a perplexity test on a corpus to measure speedup and PPL increase vs. dense baseline.
+
+### For AMD ROCm (e.g., Radeon Pro W7800)
+1. **Prerequisites**: Install ROCm (>=5.0), ensure you have a compatible GPU, and have the `llama.cpp` v4 fork cloned at `vendor/llama.cpp-v4`.
+2. **Build llama.cpp with HIP**:
+   ```bash
+   cd vendor/llama.cpp-v4
+   mkdir -p build && cd build
+   # HIP-specific flags; adjust if ROCm is in a non-standard location
+   cmake .. -DGGML_HIP=on -DCMAKE_BUILD_TYPE=Release
+   cmake --build . --config Release
+   ```
+3. **Generate a LATENT GGUF** (same as for CUDA):
+   ```bash
+   cd /path/to/latent
+   python loader/write_latent_gguf.py \
+       --input-gguf /path/to/source.gguf \
+       --output-gguf /tmp/model_latent.gguf \
+       --max-rank 128 \
+       --energy 0.99
+   ```
+4. **Install the LATENT kernel** (same as CUDA):
+   ```bash
+   cd /path/to/latent
+   ./install.sh
+   ```
+5. **Run inference**:
+   ```bash
+   cd /path/to/llama.cpp-v4/build
+   ./bin/llama-cli -m /tmp/model_latent.gguf -p "Hello, world!" -n 8 --logit-bias
+   ```
+   If successful, the HIP kernel is running.
+
+### Notes
+- The `install.sh` script must be run from the latent repository root; it copies the kernel source files (`latent-fused-expert-ffn.cu` and `.cuh`) into the appropriate `ggml-cuda/` and `ggml-hip/` directories of the llama.cpp checkout.
+- For ROCm, you may need to set `export HIP_PATH=/opt/rocm` before building if ROCm is not in your default path.
+- The first run may take a moment as the kernel JIT-compiles; subsequent runs are faster.
+- To measure performance, run a perplexity evaluation (e.g., using `lm-eval` or a custom script) comparing the LATENT GGUF to the original dense GGUF at the same context length; look for <0.3% PPL increase and higher tokens/sec.
+- If you encounter build errors, ensure your CUDA/ROCm toolkit is properly installed and that the clang/hipcc compiler is in your PATH.
 
 ## Repository Layout
 
