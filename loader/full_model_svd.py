@@ -102,10 +102,12 @@ def compress_expert_to_factors(
 
     for e in range(n_expert):
         expert_name = f"{name}.expert{e}"
-        expert_matrix = matrix[:, :, e].T  # transpose to [n_out, n_in] for SVD
-        # The SVD pipeline expects W = A @ B where A is [m, r] and B is [r, n]
-        # For the LoRA convention: W = A @ B with A = U*sqrt(S), B = sqrt(S)*Vt
-        # Here we treat the original W as the dense expert projection
+        # LATENT convention (matches kernel): W = A @ B with A:[n_in, r] and
+        # B:[r, n_out]. The kernel multiplies x @ A first (input-side factor),
+        # then latent @ B (output-side factor). We keep the matrix in its
+        # original (n_in, n_out) orientation so the factorization lines up
+        # with the kernel's access pattern.
+        expert_matrix = matrix[:, :, e]  # [n_in, n_out]
 
         compressed, report = compress_matrix(
             name=expert_name,
