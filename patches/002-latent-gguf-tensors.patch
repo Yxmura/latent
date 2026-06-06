@@ -1,52 +1,216 @@
 diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
-index 0899696..27841f8 100644
+index 0899696..ccb941b 100644
 --- a/src/llama-arch.cpp
 +++ b/src/llama-arch.cpp
-@@ -392,6 +392,7 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
+@@ -212,6 +212,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_INTERLEAVE_MOE_LAYER_STEP,         "%s.interleave_moe_layer_step"         },
+     { LLM_KV_FULL_ATTENTION_INTERVAL,           "%s.full_attention_interval"           },
+     { LLM_KV_HASH_LAYER_COUNT,                  "%s.hash_layer_count"                  },
++    { LLM_KV_LATENT_MAX_RANK,                   "%s.latent.max_rank"                   },
+     { LLM_KV_HYPER_CONNECTION_COUNT,            "%s.hyper_connection.count"            },
+     { LLM_KV_HYPER_CONNECTION_SINKHORN_ITERS,   "%s.hyper_connection.sinkhorn_iterations" },
+     { LLM_KV_HYPER_CONNECTION_EPS,              "%s.hyper_connection.epsilon"          },
+@@ -392,6 +393,12 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
      { LLM_TENSOR_FFN_EXP_PROBS_B,                        "blk.%d.exp_probs_b" },
      { LLM_TENSOR_FFN_LATENT_DOWN,                        "blk.%d.ffn_latent_down" },
      { LLM_TENSOR_FFN_LATENT_UP,                          "blk.%d.ffn_latent_up" },
-+    { LLM_TENSOR_FFN_LATENT_GATE,                        "blk.%d.ffn_latent_gate" },
++    { LLM_TENSOR_FFN_LATENT_GATE_A,                      "blk.%d.ffn_latent_gate_a" },
++    { LLM_TENSOR_FFN_LATENT_GATE_B,                      "blk.%d.ffn_latent_gate_b" },
++    { LLM_TENSOR_FFN_LATENT_UP_A,                        "blk.%d.ffn_latent_up_a" },
++    { LLM_TENSOR_FFN_LATENT_UP_B,                        "blk.%d.ffn_latent_up_b" },
++    { LLM_TENSOR_FFN_LATENT_DOWN_A,                      "blk.%d.ffn_latent_down_a" },
++    { LLM_TENSOR_FFN_LATENT_DOWN_B,                      "blk.%d.ffn_latent_down_b" },
      { LLM_TENSOR_ATTN_NORM_2,                            "blk.%d.attn_norm_2" },
      { LLM_TENSOR_ATTN_QKV,                               "blk.%d.attn_qkv" },
      { LLM_TENSOR_LAYER_OUT_NORM,                         "blk.%d.layer_output_norm" },
+@@ -820,6 +827,13 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
+     // Nemotron 3 Super
+     {LLM_TENSOR_FFN_LATENT_DOWN,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+     {LLM_TENSOR_FFN_LATENT_UP,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
++    // LATENT per-expert stacked A/B factors (handled by fused op, not mul)
++    {LLM_TENSOR_FFN_LATENT_GATE_A,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_NONE}},
++    {LLM_TENSOR_FFN_LATENT_GATE_B,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_NONE}},
++    {LLM_TENSOR_FFN_LATENT_UP_A,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_NONE}},
++    {LLM_TENSOR_FFN_LATENT_UP_B,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_NONE}},
++    {LLM_TENSOR_FFN_LATENT_DOWN_A,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_NONE}},
++    {LLM_TENSOR_FFN_LATENT_DOWN_B,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_NONE}},
+ };
+ 
+ LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}
 diff --git a/src/llama-arch.h b/src/llama-arch.h
-index d346f14..41ede4e 100644
+index d346f14..1d34420 100644
 --- a/src/llama-arch.h
 +++ b/src/llama-arch.h
-@@ -412,6 +412,7 @@ enum llm_tensor {
+@@ -216,6 +216,7 @@ enum llm_kv {
+     LLM_KV_INTERLEAVE_MOE_LAYER_STEP,
+     LLM_KV_FULL_ATTENTION_INTERVAL,
+     LLM_KV_HASH_LAYER_COUNT,
++    LLM_KV_LATENT_MAX_RANK,
+     LLM_KV_HYPER_CONNECTION_COUNT,
+     LLM_KV_HYPER_CONNECTION_SINKHORN_ITERS,
+     LLM_KV_HYPER_CONNECTION_EPS,
+@@ -412,6 +413,12 @@ enum llm_tensor {
      LLM_TENSOR_FFN_EXP_PROBS_B,
      LLM_TENSOR_FFN_LATENT_DOWN,
      LLM_TENSOR_FFN_LATENT_UP,
-+    LLM_TENSOR_FFN_LATENT_GATE,
++    LLM_TENSOR_FFN_LATENT_GATE_A,
++    LLM_TENSOR_FFN_LATENT_GATE_B,
++    LLM_TENSOR_FFN_LATENT_UP_A,
++    LLM_TENSOR_FFN_LATENT_UP_B,
++    LLM_TENSOR_FFN_LATENT_DOWN_A,
++    LLM_TENSOR_FFN_LATENT_DOWN_B,
      LLM_TENSOR_ATTN_Q_NORM,
      LLM_TENSOR_ATTN_K_NORM,
      LLM_TENSOR_LAYER_OUT_NORM,
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index 5ef06d8..483fdde 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -78,6 +78,7 @@ struct llama_hparams {
+     uint32_t n_lora_kv          = 0;
+     uint32_t n_lora_o           = 0;
+     uint32_t n_attn_out_groups  = 0;
++    uint32_t n_latent_max_rank  = 0;
+     uint32_t n_ff_exp           = 0;
+     uint32_t n_ff_shexp         = 0;
+     uint32_t n_ff_chexp         = 0;
 diff --git a/src/llama-model.h b/src/llama-model.h
-index 60561a2..f6ce177 100644
+index 60561a2..e320545 100644
 --- a/src/llama-model.h
 +++ b/src/llama-model.h
-@@ -314,6 +314,7 @@ struct llama_layer {
-     // ff MoE latent proj
+@@ -311,7 +311,21 @@ struct llama_layer {
+     struct ggml_tensor * ffn_down_exps_s   = nullptr;
+     struct ggml_tensor * ffn_up_exps_s     = nullptr;
+ 
+-    // ff MoE latent proj
++    // ff MoE latent proj (LATENT: per-expert stacked A/B factors, NF4 + FP16 scales)
++    struct ggml_tensor * ffn_latent_gate_a   = nullptr;
++    struct ggml_tensor * ffn_latent_gate_a_s = nullptr;
++    struct ggml_tensor * ffn_latent_gate_b   = nullptr;
++    struct ggml_tensor * ffn_latent_gate_b_s = nullptr;
++    struct ggml_tensor * ffn_latent_up_a     = nullptr;
++    struct ggml_tensor * ffn_latent_up_a_s   = nullptr;
++    struct ggml_tensor * ffn_latent_up_b     = nullptr;
++    struct ggml_tensor * ffn_latent_up_b_s   = nullptr;
++    struct ggml_tensor * ffn_latent_down_a   = nullptr;
++    struct ggml_tensor * ffn_latent_down_a_s = nullptr;
++    struct ggml_tensor * ffn_latent_down_b   = nullptr;
++    struct ggml_tensor * ffn_latent_down_b_s = nullptr;
++
++    // ff MoE latent proj (Nemotron 3 Super dense per-layer projections)
      struct ggml_tensor * ffn_latent_down = nullptr;
      struct ggml_tensor * ffn_latent_up   = nullptr;
-+    struct ggml_tensor * ffn_latent_gate = nullptr;
  
-     // ff shared expert (shexp)
-     struct ggml_tensor * ffn_gate_inp_shexp = nullptr;
 diff --git a/src/models/deepseek4.cpp b/src/models/deepseek4.cpp
-index c45f9a0..5465205 100644
+index c45f9a0..f483e5e 100644
 --- a/src/models/deepseek4.cpp
 +++ b/src/models/deepseek4.cpp
-@@ -152,6 +152,11 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader &) {
+@@ -38,6 +38,7 @@ void llama_model_deepseek4::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,      hparams.indexer_head_size, false);
+     ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,           hparams.indexer_top_k, false);
+     ml.get_key(LLM_KV_HASH_LAYER_COUNT,                  hparams.n_hash_layers);
++    ml.get_key(LLM_KV_LATENT_MAX_RANK,                   hparams.n_latent_max_rank, false);
+     ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS,              hparams.nextn_predict_layers, false);
+     ml.get_key(LLM_KV_HYPER_CONNECTION_COUNT,            hparams.n_hc);
+     ml.get_key(LLM_KV_HYPER_CONNECTION_SINKHORN_ITERS,   hparams.hc_sinkhorn_iters);
+@@ -78,6 +79,7 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader &) {
+     const int64_t n_ff_exp          = hparams.n_ff_exp;
+     const int64_t n_expert_shared   = hparams.n_expert_shared;
+     const int64_t n_hc              = hparams.n_hc;
++    const int64_t n_latent_rank     = hparams.n_latent_max_rank;
+     const int64_t hc_dim            = n_hc * n_embd;
+     const int64_t hc_mix            = (2 + n_hc) * n_hc;
+ 
+@@ -152,6 +154,29 @@ void llama_model_deepseek4::load_arch_tensors(llama_model_loader &) {
          layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd,   n_expert}, 0);
          layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd,   n_ff_exp, n_expert}, 0);
  
-+        // LATENT: optional factor projections, only present in LATENT-quantized GGUFs
-+        layer.ffn_latent_gate = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE, "weight", i), {n_embd,   n_ff_exp}, TENSOR_NOT_REQUIRED);
-+        layer.ffn_latent_up   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP,   "weight", i), {n_embd,   n_ff_exp}, TENSOR_NOT_REQUIRED);
-+        layer.ffn_latent_down = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN, "weight", i), {n_ff_exp, n_embd},   TENSOR_NOT_REQUIRED);
++        // LATENT: per-expert stacked A/B factors, NF4 packed + FP16 per-group scales.
++        // Tensors are TENSOR_NOT_REQUIRED: dense GGUFs without them fall through
++        // to the existing build_moe_ffn path. Shapes use max_rank from the
++        // `latent.max_rank` metadata (or 0 if absent -> latent tensors are
++        // skipped). A is the input-side factor, B is the output-side factor.
++        if (n_latent_rank > 0) {
++            // gate: W = A @ B with A:[n_embd, r], B:[r, n_ff_exp]
++            layer.ffn_latent_gate_a   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_A,   "weight", i), {n_expert, n_embd,   n_latent_rank     }, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_gate_a_s = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_A,   "scales", i), {n_expert, n_embd,   n_latent_rank / 32}, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_gate_b   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_B,   "weight", i), {n_expert, n_latent_rank, n_ff_exp     }, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_gate_b_s = create_tensor(tn(LLM_TENSOR_FFN_LATENT_GATE_B,   "scales", i), {n_expert, n_latent_rank, n_ff_exp / 32}, TENSOR_NOT_REQUIRED);
++            // up: same shape as gate
++            layer.ffn_latent_up_a     = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_A,     "weight", i), {n_expert, n_embd,   n_latent_rank     }, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_up_a_s   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_A,     "scales", i), {n_expert, n_embd,   n_latent_rank / 32}, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_up_b     = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_B,     "weight", i), {n_expert, n_latent_rank, n_ff_exp     }, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_up_b_s   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_UP_B,     "scales", i), {n_expert, n_latent_rank, n_ff_exp / 32}, TENSOR_NOT_REQUIRED);
++            // down: A:[n_ff_exp, r], B:[r, n_embd]
++            layer.ffn_latent_down_a   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_A,   "weight", i), {n_expert, n_ff_exp, n_latent_rank     }, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_down_a_s = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_A,   "scales", i), {n_expert, n_ff_exp, n_latent_rank / 32}, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_down_b   = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_B,   "weight", i), {n_expert, n_latent_rank, n_embd     }, TENSOR_NOT_REQUIRED);
++            layer.ffn_latent_down_b_s = create_tensor(tn(LLM_TENSOR_FFN_LATENT_DOWN_B,   "scales", i), {n_expert, n_latent_rank, n_embd / 32}, TENSOR_NOT_REQUIRED);
++        }
 +
          layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd,   n_ff_exp * n_expert_shared}, 0);
          layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_exp * n_expert_shared, n_embd}, 0);
          layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd,   n_ff_exp * n_expert_shared}, 0);
+@@ -1529,23 +1554,45 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
+             cb(selected, "ffn_moe_hash_topk", il);
+         }
+ 
+-        ggml_tensor * moe_out = build_moe_ffn(cur,
+-                layer.ffn_gate_inp,
+-                layer.ffn_up_exps,
+-                layer.ffn_gate_exps,
+-                layer.ffn_down_exps,
+-                layer.ffn_exp_probs_b,
+-                n_expert, n_expert_used,
+-                LLM_FFN_SILU, hparams.expert_weights_norm,
+-                hparams.expert_weights_scale,
+-                (llama_expert_gating_func_type) hparams.expert_gating_func,
+-                il,
+-                nullptr,
+-                nullptr,
+-                nullptr,
+-                nullptr,
+-                nullptr,
+-                selected);
++        ggml_tensor * moe_out;
++        if (layer.ffn_latent_gate_a != nullptr) {
++            // LATENT path: 12 stacked per-expert A/B factor tensors are
++            // present, dispatch to the fused ggml_latent_expert_ffn op via
++            // build_moe_ffn_latent. Routing logic is the same as dense.
++            moe_out = build_moe_ffn_latent(cur,
++                    layer.ffn_gate_inp,
++                    layer.ffn_exp_probs_b,
++                    n_expert, n_expert_used,
++                    hparams.expert_weights_scale,
++                    (llama_expert_gating_func_type) hparams.expert_gating_func,
++                    il,
++                    nullptr,
++                    layer.ffn_latent_gate_a, layer.ffn_latent_gate_a_s,
++                    layer.ffn_latent_gate_b, layer.ffn_latent_gate_b_s,
++                    layer.ffn_latent_up_a,   layer.ffn_latent_up_a_s,
++                    layer.ffn_latent_up_b,   layer.ffn_latent_up_b_s,
++                    layer.ffn_latent_down_a, layer.ffn_latent_down_a_s,
++                    layer.ffn_latent_down_b, layer.ffn_latent_down_b_s,
++                    selected);
++        } else {
++            moe_out = build_moe_ffn(cur,
++                    layer.ffn_gate_inp,
++                    layer.ffn_up_exps,
++                    layer.ffn_gate_exps,
++                    layer.ffn_down_exps,
++                    layer.ffn_exp_probs_b,
++                    n_expert, n_expert_used,
++                    LLM_FFN_SILU, hparams.expert_weights_norm,
++                    hparams.expert_weights_scale,
++                    (llama_expert_gating_func_type) hparams.expert_gating_func,
++                    il,
++                    nullptr,
++                    nullptr,
++                    nullptr,
++                    nullptr,
++                    nullptr,
++                    selected);
++        }
+         cb(moe_out, "ffn_moe_out", il);
+         ggml_tensor * ffn_shexp = build_ffn(cur,
+                 layer.ffn_up_shexp,   nullptr, nullptr,

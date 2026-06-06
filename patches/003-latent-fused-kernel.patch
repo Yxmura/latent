@@ -150,59 +150,6 @@ index 6e072c4..940fdcc 100644
          case GGML_OP_MUL_MAT:
          case GGML_OP_MUL_MAT_ID:
              {
-diff --git a/ggml/src/ggml-cuda/latent-fused-expert-ffn.cu b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cu
-new file mode 100644
-index 0000000..a147387
---- /dev/null
-+++ b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cu
-@@ -0,0 +1,19 @@
-+// ggml/src/ggml-cuda/latent-fused-expert-ffn.cu
-+// LATENT MoE expert FFN kernel stub.
-+//
-+// install.sh overwrites this file with the real v1 kernel from
-+// kernels/latent_fused_expert_ffn.cu at install time. The stub here
-+// exists so the patch series applies to a clean llama.cpp checkout
-+// and the codebase still builds (it just aborts at runtime if the
-+// LATENT op is ever executed without a real kernel being installed).
-+
-+#include "latent-fused-expert-ffn.cuh"
-+
-+void ggml_cuda_latent_expert_ffn(
-+    ggml_backend_cuda_context & ctx,
-+    struct ggml_tensor * dst) {
-+    GGML_ABORT("ggml_cuda_latent_expert_ffn: kernel not installed; "
-+               "run install.sh to copy the real v1 kernel from "
-+               "kernels/latent_fused_expert_ffn.cu into "
-+               "ggml/src/ggml-cuda/latent-fused-expert-ffn.cu");
-+}
-diff --git a/ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh
-new file mode 100644
-index 0000000..1f38561
---- /dev/null
-+++ b/ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh
-@@ -0,0 +1,22 @@
-+// ggml/src/ggml-cuda/latent-fused-expert-ffn.cuh
-+// LATENT MoE expert FFN host wrapper.
-+//
-+// This file is installed by patches/003 (as a stub declaration) and then
-+// OVERWRITTEN at install time by install.sh, which copies
-+// kernels/latent_fused_expert_ffn.cuh from the LATENT repo into this
-+// location. The real header declares the host wrapper and the NF4
-+// dequant helpers used by the v1 fused kernel.
-+
-+#pragma once
-+
-+#include "ggml.h"
-+
-+struct ggml_backend_cuda_context;
-+
-+// Host wrapper for the LATENT fused expert FFN kernel. Called by
-+// ggml_cuda_op_latent_expert_ffn() in latent.cu. The patch's stub
-+// implementation (in latent-fused-expert-ffn.cu) ABORTs at runtime;
-+// the real kernel is provided by install.sh.
-+void ggml_cuda_latent_expert_ffn(
-+    ggml_backend_cuda_context & ctx,
-+    struct ggml_tensor * dst);
 diff --git a/ggml/src/ggml-cuda/unary.cu b/ggml/src/ggml-cuda/unary.cu
 index 2aeba26..302c068 100644
 --- a/ggml/src/ggml-cuda/unary.cu
@@ -244,15 +191,11 @@ index 81ed873..9570e33 100644
  
  void ggml_cuda_op_unary_mul(ggml_backend_cuda_context & ctx, ggml_tensor * unary_node, ggml_tensor * mul_node);
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index ebf9630..a77abfd 100644
+index ebf9630..fdcad26 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -1084,9 +1084,11 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
-     "OPT_STEP_SGD",
- 
+@@ -1086,7 +1086,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
      "GLU",
-+
-+    "LATENT_EXPERT_FFN",
  };
  
 -static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
@@ -260,12 +203,8 @@ index ebf9630..a77abfd 100644
  
  static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "none",
-@@ -1200,9 +1202,11 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
-     "sgd(x)",
- 
+@@ -1202,7 +1202,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "glu(x)",
-+
-+    "latent_expert_ffn(x,ids,w,A,B,...)",
  };
  
 -static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
@@ -273,28 +212,34 @@ index ebf9630..a77abfd 100644
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
-@@ -2903,6 +2907,79 @@ static struct ggml_tensor * ggml_glu_impl(
-     return result;
+@@ -2904,6 +2904,85 @@ static struct ggml_tensor * ggml_glu_impl(
  }
  
+ // ggml_floor
 +// ggml_latent_expert_ffn
 +//
 +// Build a graph node for the fused LATENT MoE expert FFN. The kernel takes:
 +//   src[0]  = x               [n_embd, n_tokens]
 +//   src[1]  = ids             [n_expert_used, n_tokens]  (selected_experts)
 +//   src[2]  = weights         [1, n_expert_used, n_tokens] (routing weights)
-+//   src[3]  = gate_a_nf4      [n_embd, max_rank]
-+//   src[4]  = gate_a_scales   [n_embd/32, max_rank]
-+//   src[5]  = gate_b_nf4      [max_rank, n_ff]
-+//   src[6]  = gate_b_scales   [max_rank, n_ff/32]
-+//   src[7]  = up_a_nf4        [n_embd, max_rank]
-+//   src[8]  = up_a_scales
-+//   src[9]  = up_b_nf4        [max_rank, n_ff]
-+//   src[10] = up_b_scales
-+//   src[11] = down_a_nf4      [n_ff, max_rank]
-+//   src[12] = down_a_scales
-+//   src[13] = down_b_nf4      [max_rank, n_embd]
-+//   src[14] = down_b_scales
++//   src[3]  = gate_a_nf4      [n_expert, n_embd, max_rank]   (per-expert stacked)
++//   src[4]  = gate_a_scales   [n_expert, n_embd, max_rank/32] (FP16, per-group)
++//   src[5]  = gate_b_nf4      [n_expert, max_rank, n_ff]
++//   src[6]  = gate_b_scales   [n_expert, max_rank, n_ff/32]
++//   src[7]  = up_a_nf4        [n_expert, n_embd, max_rank]
++//   src[8]  = up_a_scales     [n_expert, n_embd, max_rank/32]
++//   src[9]  = up_b_nf4        [n_expert, max_rank, n_ff]
++//   src[10] = up_b_scales     [n_expert, max_rank, n_ff/32]
++//   src[11] = down_a_nf4      [n_expert, n_ff, max_rank]
++//   src[12] = down_a_scales   [n_expert, n_ff, max_rank/32]
++//   src[13] = down_b_nf4      [n_expert, max_rank, n_embd]
++//   src[14] = down_b_scales   [n_expert, max_rank, n_embd/32]
++//
++// Per LATENT.md: each expert is factorized independently as W = A*B with
++// A = U*sqrt(Sigma), B = sqrt(Sigma)*V^T, then stored as a 2D matrix in
++// the stacked factor tensor. The kernel indexes factors by expert_id from
++// the ids tensor. Storage is unpacked I8 (one NF4 code per byte) for
++// simplicity; packed (2 codes/byte) is a future optimization.
 +//
 +// Result: [n_embd, n_expert_used, n_tokens] contribution that the caller
 +// reduces (sums) across the n_expert_used axis into [n_embd, n_tokens].
@@ -350,10 +295,10 @@ index ebf9630..a77abfd 100644
 +    return result;
 +}
 +
- // ggml_floor
  
  struct ggml_tensor * ggml_floor(
-@@ -7077,6 +7154,9 @@ static void ggml_compute_backward(
+         struct ggml_context * ctx,
+@@ -7077,6 +7156,9 @@ static void ggml_compute_backward(
                  } //break;
              }
          } break;

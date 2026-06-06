@@ -76,12 +76,25 @@ checkout of `cchuter/llama.cpp` at `feat/v4-port-cuda` (verified with
    (`ggml/src/ggml-cuda/latent-fused-expert-ffn.cu` and `.cuh`). This is
    self-contained: it adds new files, modifies no existing source.
 
-2. **002-latent-gguf-tensors.patch** — adds the missing
-   `LLM_TENSOR_FFN_LATENT_GATE` enum, registers its tensor name in
-   `llama-arch.cpp`, adds the `ffn_latent_gate` field to the layer struct
-   in `llama-model.h`, and adds optional `TENSOR_NOT_REQUIRED` loading of
-   all three `ffn_latent_{gate,up,down}` projections in
-   `models/deepseek4.cpp`. Models without LATENT tensors load unchanged.
+2. **002-latent-gguf-tensors.patch** — adds the per-expert stacked A/B
+   factor tensor enums (`LLM_TENSOR_FFN_LATENT_{GATE,UP,DOWN}_{A,B}`),
+   registers their tensor names in `llama-arch.cpp`, adds 12 struct
+   fields to the layer in `llama-model.h` (6 weight + 6 FP16 scale
+   tensors, per-expert stacked), reads a new `latent.max_rank` model
+   metadata key into `hparams.n_latent_max_rank`, and adds optional
+   `TENSOR_NOT_REQUIRED` loading of all 12 tensors in
+   `models/deepseek4.cpp`. Also wires the graph build: when
+   `ffn_latent_gate_a` is non-null (LATENT GGUF detected), the call
+   dispatches to `build_moe_ffn_latent`; otherwise the existing
+   `build_moe_ffn` dense path is used. Dense GGUFs load unchanged.
+
+   Per-expert tensor shapes (GGUF element counts, I8 for NF4 data, F16
+   for scales):
+   - `ffn_latent_{gate,up}_a`: `[n_expert, n_embd, max_rank]`
+   - `ffn_latent_{gate,up}_b`: `[n_expert, max_rank, n_ff_exp]`
+   - `ffn_latent_down_a`:      `[n_expert, n_ff_exp, max_rank]`
+   - `ffn_latent_down_b`:      `[n_expert, max_rank, n_embd]`
+   - `ffn_latent_*_s` (scales): final dim divided by 32 (per-group NF4)
 
 3. **003-latent-fused-kernel.patch** — registers a new
    `GGML_OP_LATENT_EXPERT_FFN` (bumping `GGML_OP_COUNT` from 102 to 103).
@@ -101,10 +114,6 @@ checkout of `cchuter/llama.cpp` at `feat/v4-port-cuda` (verified with
 
 **Not yet wired up in the patch series:**
 
-- The `models/deepseek4.cpp::build_graph` call site that branches on
-  whether the model is dense or LATENT. This is the final integration
-  step and requires per-model knowledge of the LATENT GGUF tensor layout
-  that has not been verified.
 - Real CUDA build verification. The CPU-only build is verified clean
   with all three patches applied. The CUDA build hits a pre-existing
   v4 fork issue in `soft_max_f32` template instantiation that is
