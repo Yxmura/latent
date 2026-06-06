@@ -14,7 +14,8 @@ LATENT_DEVICE float latent_nf4_value(uint8_t code) {
 }
 
 LATENT_DEVICE float latent_load_nf4(const latent_nf4_matrix & matrix, int linear_index) {
-    const uint8_t code = matrix.data[linear_index];
+    const uint8_t packed = matrix.data[linear_index >> 1];
+    const uint8_t code = (linear_index & 1) ? (packed >> 4) : (packed & 0x0F);
     const int group = linear_index / matrix.group_size;
     return latent_nf4_value(code) * __half2float(matrix.scales[group]);
 }

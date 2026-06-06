@@ -104,14 +104,17 @@ def test_synthetic_roundtrip(tmpdir: str) -> None:
             for ab in ("a", "b"):
                 assert f"blk.{layer}.ffn_latent_{kind}_{ab}" in tensor_names, \
                     f"missing blk.{layer}.ffn_latent_{kind}_{ab}"
+            # Per-expert ranks uint8 tensor: (n_expert, 3)
+            assert f"blk.{layer}.ffn_latent_ranks" in tensor_names, \
+                f"missing blk.{layer}.ffn_latent_ranks"
     # Validate tensor shapes match the per-expert stacked layout consumed
     # by the CUDA kernel in kernels/latent_fused_expert_ffn.cu.
-    # gate/up: gate_a   ne=[n_expert, n_embd, padded_max_rank]
+    # gate/up: gate_a   ne=[n_expert, n_embd, padded_max_rank // 2]  (packed, 2 codes/byte)
     #          gate_a_s ne=[n_expert, n_embd, n_groups_a]
-    #          gate_b   ne=[n_expert, padded_max_rank, padded_n_ff]
+    #          gate_b   ne=[n_expert, padded_max_rank, padded_n_ff // 2]
     #          gate_b_s ne=[n_expert, padded_max_rank, n_groups_b]
-    # down:     down_a   ne=[n_expert, n_ff, padded_max_rank]
-    #          down_b   ne=[n_expert, padded_max_rank, n_embd]
+    # down:     down_a   ne=[n_expert, n_ff, padded_max_rank // 2]
+    #          down_b   ne=[n_expert, padded_max_rank, n_embd // 2]
     n_expert = 4
     n_embd = 32
     n_ff = 16
@@ -123,12 +126,12 @@ def test_synthetic_roundtrip(tmpdir: str) -> None:
             a_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_a_s"]
             b = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b"]
             b_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b_s"]
-            assert tuple(a.shape) == (n_expert, n_embd, max_rank), \
-                f"{a.name} shape {a.shape} != {(n_expert, n_embd, max_rank)}"
+            assert tuple(a.shape) == (n_expert, n_embd, max_rank // 2), \
+                f"{a.name} shape {a.shape} != {(n_expert, n_embd, max_rank // 2)}"
             assert tuple(a_s.shape) == (n_expert, n_embd, n_groups), \
                 f"{a_s.name} shape {a_s.shape} != {(n_expert, n_embd, n_groups)}"
-            assert tuple(b.shape) == (n_expert, max_rank, n_ff), \
-                f"{b.name} shape {b.shape} != {(n_expert, max_rank, n_ff)}"
+            assert tuple(b.shape) == (n_expert, max_rank, n_ff // 2), \
+                f"{b.name} shape {b.shape} != {(n_expert, max_rank, n_ff // 2)}"
             assert tuple(b_s.shape) == (n_expert, max_rank, n_ff // 4), \
                 f"{b_s.name} shape {b_s.shape} != {(n_expert, max_rank, n_ff // 4)}"
             assert a.tensor_type.name == "I8"
@@ -140,14 +143,23 @@ def test_synthetic_roundtrip(tmpdir: str) -> None:
             a_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_a_s"]
             b = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b"]
             b_s = tensors_by_name[f"blk.{layer}.ffn_latent_{kind}_b_s"]
-            assert tuple(a.shape) == (n_expert, n_ff, max_rank), \
-                f"{a.name} shape {a.shape} != {(n_expert, n_ff, max_rank)}"
+            assert tuple(a.shape) == (n_expert, n_ff, max_rank // 2), \
+                f"{a.name} shape {a.shape} != {(n_expert, n_ff, max_rank // 2)}"
             assert tuple(a_s.shape) == (n_expert, n_ff, n_groups), \
                 f"{a_s.name} shape {a_s.shape} != {(n_expert, n_ff, n_groups)}"
-            assert tuple(b.shape) == (n_expert, max_rank, n_embd), \
-                f"{b.name} shape {b.shape} != {(n_expert, max_rank, n_embd)}"
+            assert tuple(b.shape) == (n_expert, max_rank, n_embd // 2), \
+                f"{b.name} shape {b.shape} != {(n_expert, max_rank, n_embd // 2)}"
             assert tuple(b_s.shape) == (n_expert, max_rank, n_embd // 4), \
                 f"{b_s.name} shape {b_s.shape} != {(n_expert, max_rank, n_embd // 4)}"
+    # Check per-expert ranks tensor: (n_expert, 3) uint8
+    for layer in range(2):
+        r = tensors_by_name[f"blk.{layer}.ffn_latent_ranks"]
+        assert tuple(r.shape) == (n_expert, 3), \
+            f"{r.name} shape {r.shape} != {(n_expert, 3)}"
+        assert r.tensor_type.name == "I8"
+        ranks_data = np.asarray(r.data, dtype=np.uint8).reshape(r.shape)
+        assert np.all(ranks_data >= 2), f"ranks too small: {ranks_data.min()}"
+        assert np.all(ranks_data <= max_rank), f"ranks exceed max_rank: {ranks_data}"
     assert "output_norm" in tensor_names
     assert "output" in tensor_names
     assert "blk.0.ffn_norm" in tensor_names
@@ -203,12 +215,22 @@ def test_synthetic_reconstruction(tmpdir: str) -> None:
             b_scales = np.asarray(lat[b_s_name].data, dtype=np.float16).reshape(lat[b_s_name].shape)
 
             for e in range(n_expert):
-                # Storage layout: 1 NF4 code per byte (unpacked). The kernel's
-                # `data[h * cols + r]` indexing matches this directly.
+                # Storage layout: 2 NF4 codes per byte (packed). We must unpack them
+                # into 1-code-per-byte before dequantizing.
                 from loader.latent_loader import NF4_CODEBOOK
 
-                a_codes_e = a_codes[e]  # (n_in, padded_rank) - NF4 codes
-                b_codes_e = b_codes[e]  # (padded_rank, n_out) - NF4 codes
+                # Unpack gate_a_codes (each byte -> 2 codes)
+                a_packed = a_codes[e]  # (n_in, padded_rank // 2)
+                a_codes_e = np.empty((a_packed.shape[0], a_packed.shape[1] * 2), dtype=np.uint8)
+                a_codes_e[:, 0::2] = a_packed & 0x0F
+                a_codes_e[:, 1::2] = a_packed >> 4
+
+                # Unpack gate_b_codes
+                b_packed = b_codes[e]  # (padded_rank, n_out // 2)
+                b_codes_e = np.empty((b_packed.shape[0], b_packed.shape[1] * 2), dtype=np.uint8)
+                b_codes_e[:, 0::2] = b_packed & 0x0F
+                b_codes_e[:, 1::2] = b_packed >> 4
+
                 a_scales_e = a_scales[e]  # (n_in, n_groups_a)
                 b_scales_e = b_scales[e]  # (padded_rank, n_groups_b)
 

@@ -136,7 +136,7 @@ def compress_layer_to_stacked(
     error_threshold: float,
     snr_threshold: float,
     low_snr_fraction_threshold: float,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], List[MatrixReport]]:
+) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], List[MatrixReport], np.ndarray]:
     """Compress one layer's experts into stacked per-expert factor tensors.
 
     Args:
@@ -149,6 +149,7 @@ def compress_layer_to_stacked(
       weight_tensors: 6 NF4 packed arrays (gate_a, gate_b, up_a, up_b, down_a, down_b)
       scale_tensors:  6 FP16 scale arrays
       reports: per-matrix compression reports
+      per_expert_ranks: (n_expert, 3) uint8 array, [:,0]=gate_rank, [:,1]=up_rank, [:,2]=down_rank
     """
     assert gate_exps.ndim == 3 and gate_exps.shape[2] == up_exps.shape[2] == down_exps.shape[2]
     n_expert = gate_exps.shape[2]
@@ -238,20 +239,16 @@ def compress_layer_to_stacked(
             flat_scales_list = []
             for row in flat:
                 packed, scales, _ = quantize_nf4(row.astype(np.float32), group_size=group_size)
-                # Unpack: 2 NF4 codes per byte -> 1 NF4 code per byte. The kernel
-                # accesses codes as 1-byte-per-index, so we must store them
-                # unpacked to match the kernel's data layout.
-                codes = np.empty(packed.size * 2, dtype=np.uint8)
-                codes[0::2] = packed & 0x0F
-                codes[1::2] = packed >> 4
-                if codes.size < padded_last:
-                    codes = np.pad(codes, (0, padded_last - codes.size), constant_values=7)
+                # Keep packed: 2 NF4 codes per byte (nibbles). The kernel
+                # accesses codes using (index >> 1) and & 1 to unpack.
+                if packed.size < (padded_last // 2):
+                    packed = np.pad(packed, (0, (padded_last // 2) - packed.size), constant_values=0x77)
                 if scales.size < n_groups:
                     scales = np.pad(scales, (0, n_groups - scales.size), constant_values=1.0)
-                flat_packed_list.append(codes)
+                flat_packed_list.append(packed)
                 flat_scales_list.append(scales)
             stacked_codes = np.stack(flat_packed_list, axis=0).reshape(
-                stacked_factor.shape[0], stacked_factor.shape[1], padded_last
+                stacked_factor.shape[0], stacked_factor.shape[1], padded_last // 2
             )
             stacked_scales = np.stack(flat_scales_list, axis=0).reshape(
                 stacked_factor.shape[0], stacked_factor.shape[1], n_groups
@@ -259,7 +256,15 @@ def compress_layer_to_stacked(
             weight_tensors[_factor_name(layer_idx, kind, ab)] = stacked_codes
             scale_tensors[_factor_name(layer_idx, kind, f"{ab}_s")] = stacked_scales
 
-    return weight_tensors, scale_tensors, reports
+    # Per-expert per-kind ranks. Reports are ordered: gate[0], up[0], down[0],
+    # gate[1], up[1], down[1], ... so expert e kind k (0=gate,1=up,2=down) is
+    # at reports[e * 3 + k].
+    per_expert_ranks = np.zeros((n_expert, 3), dtype=np.uint8)
+    for e in range(n_expert):
+        for k in range(3):
+            per_expert_ranks[e, k] = np.uint8(reports[e * 3 + k].rank)
+
+    return weight_tensors, scale_tensors, reports, per_expert_ranks
 
 
 def write_latent_gguf(
@@ -394,7 +399,7 @@ def write_latent_gguf(
             up = up[..., :limit_experts]
             down = down[..., :limit_experts]
 
-        weight_tensors, scale_tensors, reports = compress_layer_to_stacked(
+        weight_tensors, scale_tensors, reports, per_expert_ranks = compress_layer_to_stacked(
             layer_idx=layer_idx,
             gate_exps=gate, up_exps=up, down_exps=down,
             energy=energy, min_rank=min_rank, max_rank=max_rank,
@@ -404,18 +409,12 @@ def write_latent_gguf(
             low_snr_fraction_threshold=low_snr_fraction_threshold,
         )
 
-        # Write the 12 tensors for this layer. gguf-py reverses the recorded
+        # Write the 13 tensors for this layer. gguf-py reverses the recorded
         # shape from the numpy shape, and the file layout assumes the numpy
         # array is in C-order with its LAST dim being the fastest-changing.
         # We want the C++ kernel to see ne[0]=n_expert, ne[1]=n_in, ne[2]=max_rank
         # (or ne[2]=max_rank/32 for scales). To make gguf record that order,
         # we pass the numpy array transposed so the LAST dim is n_expert.
-        # Write the 12 tensors for this layer.
-        #
-        # gguf-py reverses the recorded shape from the numpy shape, and the file
-        # data layout is C-order on the numpy array. We want the C++ reader to
-        # see ne[0]=n_expert, ne[1]=n_in, ne[2]=max_rank (or n_out for B),
-        # with C++ row-major access (a, b, c) at byte a*N1*N2 + b*N2 + c.
         #
         # gguf-py records the dims as `numpy.shape[::-1]`, so to get recorded
         # dims (N0, N1, N2) we pass numpy of shape (N2, N1, N0). The file bytes
@@ -430,6 +429,11 @@ def write_latent_gguf(
         for name, arr in scale_tensors.items():
             t = arr.astype(np.float16).reshape(arr.shape[2], arr.shape[1], arr.shape[0])
             writer.add_tensor(name, t, raw_dtype=GGMLQuantizationType.F16)
+        # Per-expert ranks: (n_expert, 3) uint8. Pass as (3, n_expert) to
+        # get recorded shape (n_expert, 3).
+        ranks_name = f"blk.{layer_idx}.ffn_latent_ranks"
+        writer.add_tensor(ranks_name, per_expert_ranks.T.astype(np.uint8),
+                          raw_dtype=GGMLQuantizationType.I8)
         if (layer_idx + 1) % 5 == 0 or layer_idx == layer_indices[0]:
             elapsed = time.perf_counter() - t0
             print(f"  layer {layer_idx+1}/{len(layer_indices)} ({elapsed:.1f}s)")
